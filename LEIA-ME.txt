@@ -1,0 +1,40 @@
+auto_seta - resolve o minigame de setas do roubo de carro
+=========================================================
+
+AVISO: o servidor provavelmente proíbe macros. Usar isso pode dar ban.
+Use por sua conta e risco.
+
+ANTES DE TUDO
+- Deixe o jogo em "Janela sem bordas" (borderless). Tela cheia exclusiva
+  deixa a captura preta.
+- Abra o auto_seta.exe e aceite o pedido de administrador (sem isso as
+  teclas podem não chegar ao jogo).
+
+COMO USAR
+1. Calibrar (só uma vez, ou quando mudar a resolução):
+   Com o minigame aberto na tela, aperte F7. A tela congela; arraste um
+   retângulo em volta do painel das setas e solte. Esc cancela.
+   (Ou clique em "Calibrar em 3 s" no launcher e volte pro jogo.)
+2. O launcher mostra uma prévia da região e qual seta ele enxergou.
+   Se mostrar a seta certa, está pronto.
+3. Aperte F6 para ligar/desligar. Um bip agudo = ligou, bip grave = desligou.
+4. Faça o roubo normalmente; o bot aperta as setas sozinho.
+
+ATALHOS (padrão)
+  F6  liga / desliga
+  F7  calibrar região
+  F9  testar detecção (salva debug.png)
+
+TROCAR AS TECLAS
+No launcher, em "Teclas de atalho", clique no botão da ação e aperte a tecla
+nova (pode ser com CTRL/SHIFT/ALT, ou os botões laterais do mouse).
+Esc cancela. "Restaurar padrão" volta para F6/F7/F9.
+Evite letras sozinhas: o atalho também dispara quando você digita no chat.
+
+Tudo fica salvo no config.json, ao lado do .exe.
+
+PROBLEMAS
+- Windows Defender / SmartScreen reclamou: é comum com .exe feito em Python
+  sem assinatura. Clique em "Mais informações" > "Executar assim mesmo".
+- Não detecta a seta: aperte F9 com o minigame na tela e mande o debug.png
+  (fica ao lado do .exe) pra quem te passou o programa.

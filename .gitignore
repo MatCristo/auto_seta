@@ -1,0 +1,12 @@
+# build do PyInstaller
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+
+# arquivos gerados pelo programa (são de cada pessoa)
+config.json
+debug.png
