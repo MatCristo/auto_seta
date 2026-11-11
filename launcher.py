@@ -2,9 +2,9 @@
 launcher.py - Janela do auto_seta.
 
 Tudo que antes era só por atalho dá pra fazer aqui:
-  - ligar / desligar o bot
-  - calibrar a região (arrastando um retângulo num print congelado da tela)
-  - testar a detecção (mostra o print da região e a seta encontrada)
+  - ligar / desligar o bot (vale pra todos os minigames ativos)
+  - por minigame (abas "Setas" e "Números"): ativar, calibrar a região
+    arrastando um retângulo num print congelado e testar a detecção
   - trocar as teclas de atalho (clica no botão e aperta a tecla nova)
 
 O bot roda numa thread separada; ele manda eventos por uma fila e a janela
@@ -38,6 +38,17 @@ FONT_MONO = ("Consolas", 9)
 
 ARROW = {"up": "▲", "down": "▼", "left": "◀", "right": "▶"}
 
+MODE_HELP = {
+    "setas": "Com o minigame de setas na tela, aperte a tecla de calibrar: a "
+             "tela congela e você arrasta um retângulo em volta do painel.",
+    "numeros": "Com o minigame dos números na tela, aperte a tecla de calibrar "
+               "e arraste um retângulo em volta do mostrador redondo inteiro.",
+}
+SELECT_MSG = {
+    "setas": "Arraste um retângulo em volta do painel das SETAS  •  Esc cancela",
+    "numeros": "Arraste um retângulo em volta do mostrador dos NÚMEROS  •  Esc cancela",
+}
+
 
 def button(master, text, command, bg=PANEL, fg=TEXT, **kw):
     b = tk.Button(master, text=text, command=command, bg=bg, fg=fg,
@@ -51,8 +62,9 @@ def section(master, title):
     frame = tk.Frame(master, bg=PANEL, padx=14, pady=12,
                      highlightbackground=LINE, highlightthickness=1)
     frame.pack(fill="x", pady=(0, 10))
-    tk.Label(frame, text=title.upper(), bg=PANEL, fg=MUTED,
-             font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 8))
+    if title:
+        tk.Label(frame, text=title.upper(), bg=PANEL, fg=MUTED,
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 8))
     return frame
 
 
@@ -60,7 +72,7 @@ def section(master, title):
 class RegionSelector(tk.Toplevel):
     """Print congelado em tela cheia; arraste um retângulo em volta do painel."""
 
-    def __init__(self, master, png, mon, on_done):
+    def __init__(self, master, png, mon, msg, on_done):
         super().__init__(master)
         self.mon, self.on_done = mon, on_done
         self.overrideredirect(True)
@@ -73,10 +85,8 @@ class RegionSelector(tk.Toplevel):
         self.cv.pack()
         self.cv.create_image(0, 0, image=self.img, anchor="nw")
 
-        msg = ("Arraste um retângulo em volta do painel das setas  •  "
-               "Esc cancela")
         tx = mon["width"] // 2
-        self.cv.create_rectangle(tx - 300, 14, tx + 300, 50, fill="#000000",
+        self.cv.create_rectangle(tx - 320, 14, tx + 320, 50, fill="#000000",
                                  outline=YELLOW, width=2)
         self.cv.create_text(tx, 32, text=msg, fill="white", font=FONT_B)
 
@@ -129,6 +139,110 @@ class RegionSelector(tk.Toplevel):
         self.on_done(region)
 
 
+# ---------------------------------------------------------------- aba de minigame
+class ModePanel(tk.Frame):
+    """Conteúdo de uma aba: ativo, região, calibrar, testar, prévia."""
+
+    def __init__(self, master, app, mode):
+        super().__init__(master, bg=PANEL)
+        self.app, self.mode = app, mode
+        self.preview_img = None
+
+        self.active_var = tk.BooleanVar(value=app.bot.cfg[mode]["ativo"])
+        tk.Checkbutton(self, text="Resolver este minigame quando o bot estiver ligado",
+                       variable=self.active_var, command=self._toggle_active,
+                       bg=PANEL, fg=TEXT, selectcolor=BG, activebackground=PANEL,
+                       activeforeground=TEXT, font=FONT, anchor="w",
+                       highlightthickness=0, bd=0).pack(fill="x", pady=(0, 8))
+
+        self.region_lbl = tk.Label(self, text="", bg=PANEL, fg=TEXT, font=FONT,
+                                   anchor="w")
+        self.region_lbl.pack(fill="x")
+        tk.Label(self, bg=PANEL, fg=MUTED, font=FONT_SMALL, anchor="w",
+                 justify="left", wraplength=420, text=MODE_HELP[mode]).pack(
+            fill="x", pady=(4, 8))
+
+        row = tk.Frame(self, bg=PANEL)
+        row.pack(fill="x")
+        self.calib_btn = button(row, "Calibrar em 3 s", self._calibrate_delayed)
+        self.calib_btn.pack(side="left")
+        self.debug_btn = button(row, "Testar detecção",
+                                lambda: app.bot.request("debug", mode))
+        self.debug_btn.pack(side="left", padx=(8, 0))
+
+        self.preview = tk.Label(self, bg="#0d0f12", fg=MUTED, font=FONT_SMALL,
+                                text="(a prévia aparece aqui ao testar)", height=5)
+        self.preview.pack(fill="x", pady=(10, 0))
+        self.result_lbl = tk.Label(self, text="", bg=PANEL, fg=TEXT, font=FONT_B,
+                                   anchor="w", justify="left", wraplength=420)
+        self.result_lbl.pack(fill="x", pady=(6, 0))
+
+    def _toggle_active(self):
+        self.app.bot.set_mode_active(self.mode, self.active_var.get())
+        self.app.log(f"{core.MODES[self.mode]}: "
+                     f"{'ativado' if self.active_var.get() else 'desativado'}.")
+
+    def refresh(self):
+        keys = self.app.bot.cfg["teclas"]
+        r = self.app.bot.cfg[self.mode]["regiao"]
+        calib_key = keys[f"calibrar_{self.mode}"]
+        if r:
+            self.region_lbl.configure(
+                fg=TEXT, text=f"Região: x {r['left']}, y {r['top']}  •  "
+                              f"{r['width']} × {r['height']} px   (recalibrar: {calib_key})")
+        else:
+            self.region_lbl.configure(
+                fg=YELLOW, text=f"Não calibrada. Aperte {calib_key} com o "
+                                f"minigame na tela.")
+        self.debug_btn.configure(text=f"Testar detecção  ({keys['debug']})")
+
+    def _calibrate_delayed(self):
+        """Dá 3 s pra pessoa voltar pro jogo antes de congelar a tela."""
+        self.calib_btn.configure(state="disabled")
+
+        def tick(n):
+            if n == 0:
+                self.calib_btn.configure(text="Calibrar em 3 s", state="normal")
+                self.app.bot.request("calibrar", self.mode)
+                return
+            self.calib_btn.configure(text=f"Congelando em {n}…")
+            self.after(1000, tick, n - 1)
+
+        self.app.iconify()
+        tick(3)
+
+    def show_debug(self, png, res):
+        img = tk.PhotoImage(data=base64.b64encode(png))
+        factor = max(1, -(-img.width() // 420), -(-img.height() // 260))
+        if factor > 1:
+            img = img.subsample(factor)
+        self.preview_img = img
+        self.preview.configure(image=img, text="", height=img.height())
+        name = core.MODES[self.mode]
+        if self.mode == "setas":
+            if res:
+                d = res[0]
+                self.result_lbl.configure(
+                    fg=GREEN, text=f"Seta da vez: {ARROW[d]}  {core.DIR_PT[d]}")
+                self.app.log(f"Teste {name}: detectou {core.DIR_PT[d]}.")
+            else:
+                self.result_lbl.configure(
+                    fg=YELLOW, text="Nenhuma seta cinza encontrada nesse print.")
+                self.app.log(f"Teste {name}: nada detectado (normal se o "
+                             "minigame não estava aberto).")
+        else:
+            if res:
+                ordem = "  →  ".join(str(c["digito"]) for c in res)
+                self.result_lbl.configure(
+                    fg=GREEN, text=f"Bolinhas encontradas, na ordem de clique: {ordem}")
+                self.app.log(f"Teste {name}: {ordem} (recortes em debug_digitos/).")
+            else:
+                self.result_lbl.configure(
+                    fg=YELLOW, text="Nenhuma bolinha com número encontrada nesse print.")
+                self.app.log(f"Teste {name}: nada detectado (normal se o "
+                             "minigame não estava aberto).")
+
+
 # ---------------------------------------------------------------- janela
 class Launcher(tk.Tk):
     def __init__(self):
@@ -136,24 +250,24 @@ class Launcher(tk.Tk):
         self.title("auto_seta")
         self.configure(bg=BG)
         self.resizable(False, True)
-        self.minsize(460, 560)
+        self.minsize(470, 600)
 
         self.events = queue.Queue()
         cfg, erro = core.load_config()
         self.bot = core.Bot(cfg, lambda kind, data: self.events.put((kind, data)))
         core.save_config(cfg)  # cria/completa o config.json
-        self.preview_img = None
         self.capture = None
         self.key_buttons = {}
-        self.presses = 0
+        self.counts = {"tecla": 0, "clique": 0}
+        self.last_action = ""
 
         self._build()
         self._refresh_all()
         if erro:
             self.log(erro)
         if not core.is_admin():
-            self.admin_lbl.pack(fill="x", pady=(0, 10))
-        self.log("Pronto. Calibre a região com o minigame aberto na tela.")
+            self.admin_lbl.pack(fill="x", pady=(0, 10), after=self.head)
+        self.log("Pronto. Calibre cada minigame com ele aberto na tela.")
 
         self.bot.start()
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -164,18 +278,18 @@ class Launcher(tk.Tk):
         root = tk.Frame(self, bg=BG, padx=16, pady=14)
         root.pack(fill="both", expand=True)
 
-        head = tk.Frame(root, bg=BG)
-        head.pack(fill="x", pady=(0, 12))
-        tk.Label(head, text="auto_seta", bg=BG, fg=TEXT,
+        self.head = tk.Frame(root, bg=BG)
+        self.head.pack(fill="x", pady=(0, 12))
+        tk.Label(self.head, text="auto_seta", bg=BG, fg=TEXT,
                  font=FONT_TITLE).pack(side="left")
-        tk.Label(head, text="minigame de setas", bg=BG, fg=MUTED,
+        tk.Label(self.head, text="setas e números", bg=BG, fg=MUTED,
                  font=FONT_SMALL).pack(side="left", padx=(8, 0), pady=(6, 0))
 
         self.admin_lbl = tk.Label(
             root, bg="#3a2a12", fg=YELLOW, font=FONT_SMALL, justify="left",
-            anchor="w", padx=10, pady=6, wraplength=420,
-            text="Sem administrador: se as setas não chegarem ao jogo, feche e "
-                 "abra com \"Executar como administrador\".")
+            anchor="w", padx=10, pady=6, wraplength=430,
+            text="Sem administrador: se as teclas e cliques não chegarem ao jogo, "
+                 "feche e abra com \"Executar como administrador\".")
 
         # --- status
         s = section(root, "Bot")
@@ -188,37 +302,29 @@ class Launcher(tk.Tk):
         self.status_lbl = tk.Label(row, text="DESLIGADO", bg=PANEL, fg=TEXT,
                                    font=FONT_B)
         self.status_lbl.pack(side="left", padx=(6, 0))
-        self.toggle_btn = button(row, "Ligar", self._toggle, bg=GREEN,
+        self.toggle_btn = button(row, "Ligar", self.bot.toggle, bg=GREEN,
                                  fg="#0b1a10")
         self.toggle_btn.pack(side="right")
+        self.modes_lbl = tk.Label(s, text="", bg=PANEL, fg=MUTED,
+                                  font=FONT_SMALL, anchor="w")
+        self.modes_lbl.pack(fill="x", pady=(6, 0))
         self.count_lbl = tk.Label(s, text="", bg=PANEL, fg=MUTED,
                                   font=FONT_SMALL, anchor="w")
-        self.count_lbl.pack(fill="x", pady=(6, 0))
+        self.count_lbl.pack(fill="x")
 
-        # --- região
-        s = section(root, "Região da tela")
-        self.region_lbl = tk.Label(s, text="", bg=PANEL, fg=TEXT, font=FONT,
-                                   anchor="w")
-        self.region_lbl.pack(fill="x")
-        tk.Label(s, bg=PANEL, fg=MUTED, font=FONT_SMALL, anchor="w",
-                 justify="left", wraplength=420,
-                 text="Com o minigame na tela, aperte a tecla de calibrar: a tela "
-                      "congela e você arrasta um retângulo em volta do painel.").pack(
-            fill="x", pady=(4, 8))
-        row = tk.Frame(s, bg=PANEL)
-        row.pack(fill="x")
-        self.calib_btn = button(row, "Calibrar em 3 s", self._calibrate_delayed)
-        self.calib_btn.pack(side="left")
-        self.debug_btn = button(row, "Testar detecção", self._debug)
-        self.debug_btn.pack(side="left", padx=(8, 0))
-
-        self.preview = tk.Label(s, bg="#0d0f12", fg=MUTED, font=FONT_SMALL,
-                                text="(a prévia aparece aqui ao testar)",
-                                height=5)
-        self.preview.pack(fill="x", pady=(10, 0))
-        self.result_lbl = tk.Label(s, text="", bg=PANEL, fg=TEXT, font=FONT_B,
-                                   anchor="w")
-        self.result_lbl.pack(fill="x", pady=(6, 0))
+        # --- minigames (abas)
+        s = section(root, "")
+        tabs = tk.Frame(s, bg=PANEL)
+        tabs.pack(fill="x", pady=(0, 10))
+        body = tk.Frame(s, bg=PANEL)
+        body.pack(fill="x")
+        self.panels, self.tab_btns = {}, {}
+        for mode, name in core.MODES.items():
+            self.panels[mode] = ModePanel(body, self, mode)
+            b = button(tabs, name, lambda m=mode: self._select_tab(m), bg=LINE)
+            b.pack(side="left", padx=(0, 6))
+            self.tab_btns[mode] = b
+        self._select_tab("setas")
 
         # --- teclas
         s = section(root, "Teclas de atalho")
@@ -242,10 +348,17 @@ class Launcher(tk.Tk):
         # --- log
         s = section(root, "Registro")
         s.pack_configure(fill="both", expand=True, pady=0)
-        self.log_txt = tk.Text(s, height=7, bg="#0d0f12", fg=MUTED,
+        self.log_txt = tk.Text(s, height=6, bg="#0d0f12", fg=MUTED,
                                font=FONT_MONO, relief="flat", bd=0,
                                wrap="word", state="disabled", padx=8, pady=6)
         self.log_txt.pack(fill="both", expand=True)
+
+    def _select_tab(self, mode):
+        for m, p in self.panels.items():
+            p.pack_forget()
+            self.tab_btns[m].configure(bg=LINE, fg=MUTED, font=FONT)
+        self.panels[mode].pack(fill="x")
+        self.tab_btns[mode].configure(bg=ACCENT, fg="white", font=FONT_B)
 
     # ------------------------------------------------------------ helpers
     def log(self, msg):
@@ -265,75 +378,42 @@ class Launcher(tk.Tk):
         self.toggle_btn.configure(
             text=f"{'Desligar' if on else 'Ligar'}  ({keys['ligar_desligar']})",
             bg=RED if on else GREEN, fg="#1a0b0b" if on else "#0b1a10")
-        self.debug_btn.configure(text=f"Testar detecção  ({keys['debug']})")
 
-        r = self.bot.cfg["regiao"]
-        if r:
-            self.region_lbl.configure(
-                fg=TEXT, text=f"x {r['left']}, y {r['top']}  •  "
-                              f"{r['width']} × {r['height']} px")
+        ready = self.bot.ready_modes()
+        if ready:
+            self.modes_lbl.configure(
+                fg=MUTED, text="Resolve: " + ", ".join(core.MODES[m] for m in ready))
         else:
-            self.region_lbl.configure(
-                fg=YELLOW, text=f"Não calibrada. Aperte {keys['calibrar']} "
-                                f"com o minigame na tela.")
+            self.modes_lbl.configure(
+                fg=YELLOW, text="Nenhum minigame ativo e calibrado ainda.")
 
+        for p in self.panels.values():
+            p.refresh()
         for action, b in self.key_buttons.items():
             if not (self.capture and self.capture["action"] == action):
                 b.configure(text=keys[action], bg=LINE, fg=TEXT)
 
-    # ------------------------------------------------------------ ações
-    def _toggle(self):
-        self.bot.toggle()
+    def _update_counts(self):
+        self.count_lbl.configure(
+            text=f"{self.last_action}{self.counts['tecla']} setas  •  "
+                 f"{self.counts['clique']} cliques")
 
-    def _debug(self):
-        self.bot.request("debug")
-
-    def _calibrate_delayed(self):
-        """Dá 3 s pra pessoa voltar pro jogo antes de congelar a tela."""
-        self.calib_btn.configure(state="disabled")
-
-        def tick(n):
-            if n == 0:
-                self.calib_btn.configure(text="Calibrar em 3 s", state="normal")
-                self.bot.request("calibrar")
-                return
-            self.calib_btn.configure(text=f"Congelando em {n}…")
-            self.after(1000, tick, n - 1)
-
-        self.iconify()
-        tick(3)
-
-    def _open_selector(self, png, mon):
+    # ------------------------------------------------------------ calibração
+    def _open_selector(self, mode, png, mon):
         def done(region):
             self.deiconify()
+            name = core.MODES[mode]
             if region:
-                self.bot.set_region(region)
-                self.log(f"Região salva: {region['width']}×{region['height']} "
-                         f"em ({region['left']}, {region['top']}).")
+                self.bot.set_region(mode, region)
+                self.log(f"Região de {name} salva: {region['width']}×"
+                         f"{region['height']} em ({region['left']}, {region['top']}).")
+                self._select_tab(mode)
                 self._refresh_all()
-                self.bot.request("debug")  # já mostra a prévia
+                self.bot.request("debug", mode)  # já mostra a prévia
             else:
-                self.log("Calibração cancelada.")
+                self.log(f"Calibração de {name} cancelada.")
 
-        RegionSelector(self, png, mon, done)
-
-    def _show_debug(self, png, res):
-        img = tk.PhotoImage(data=base64.b64encode(png))
-        factor = max(1, -(-img.width() // 420))  # arredonda pra cima
-        if factor > 1:
-            img = img.subsample(factor)
-        self.preview_img = img
-        self.preview.configure(image=img, text="", height=img.height())
-        if res:
-            d = res[0]
-            self.result_lbl.configure(
-                fg=GREEN, text=f"Seta da vez: {ARROW[d]}  {core.DIR_PT[d]}")
-            self.log(f"Teste: detectou {core.DIR_PT[d]} (debug.png salvo).")
-        else:
-            self.result_lbl.configure(
-                fg=YELLOW, text="Nenhuma seta cinza encontrada nesse print.")
-            self.log("Teste: nada detectado (debug.png salvo). Normal se o "
-                     "minigame não estava aberto.")
+        RegionSelector(self, png, mon, SELECT_MSG[mode], done)
 
     # ------------------------------------------------------------ teclas
     def _start_capture(self, action):
@@ -407,14 +487,19 @@ class Launcher(tk.Tk):
                     self.log("Bot ligado." if data else "Bot desligado.")
                     self._refresh_all()
                 elif kind == "tecla":
-                    self.presses += 1
-                    self.count_lbl.configure(
-                        text=f"Última: {ARROW[data]} {core.DIR_PT[data]}  •  "
-                             f"{self.presses} setas apertadas")
+                    self.counts["tecla"] += 1
+                    self.last_action = f"Última: {ARROW[data]} {core.DIR_PT[data]}  •  "
+                    self._update_counts()
+                elif kind == "clique":
+                    self.counts["clique"] += 1
+                    self.last_action = f"Último: clicou no {data}  •  "
+                    self._update_counts()
                 elif kind == "calibrar":
                     self._open_selector(*data)
                 elif kind == "debug":
-                    self._show_debug(*data)
+                    mode, png, res = data
+                    self._select_tab(mode)
+                    self.panels[mode].show_debug(png, res)
                 elif kind == "erro":
                     self.log("ERRO no bot:\n" + data)
                     self._refresh_all()

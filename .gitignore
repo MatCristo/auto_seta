@@ -10,3 +10,5 @@ __pycache__/
 # arquivos gerados pelo programa (são de cada pessoa)
 config.json
 debug.png
+debug_*.png
+debug_digitos/

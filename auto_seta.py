@@ -1,12 +1,14 @@
 """
-auto_seta.py - Núcleo do bot que resolve o minigame de setas.
+auto_seta.py - Núcleo do bot dos minigames.
 
-Como funciona:
-  1. Captura só a região da tela onde o minigame aparece (calibrada uma vez).
-  2. Procura a caixa CINZA (a seta que precisa ser apertada agora).
-  3. Dentro dela, acha o triângulo branco e descobre a direção pela posição
-     do centro de massa (num triângulo, o centro fica mais perto da base).
-  4. Envia a seta via SendInput com scancode (funciona em jogos DirectInput).
+Minigames suportados (cada um com sua região da tela):
+  - "setas":   fileira de caixas com triângulos; aperta as setas do teclado.
+               A caixa CINZA é a da vez; a direção sai do centro de massa do
+               triângulo branco (num triângulo, o centro fica mais perto da base).
+  - "numeros": bolinhas com números; clica nelas em ordem (ver numeros.py).
+
+Teclas vão por SendInput com scancode e cliques por SendInput de mouse,
+que o FiveM aceita.
 
 A interface fica em launcher.py. Este módulo não usa print: tudo passa pelo
 callback de eventos do Bot (o .exe roda sem console).
@@ -26,6 +28,8 @@ import mss
 import mss.tools
 import numpy as np
 
+import numeros
+
 # mss 10+ usa mss.MSS (mss.mss foi depreciado); versões antigas só têm mss.mss
 _new_mss = getattr(mss, "MSS", None) or mss.mss
 
@@ -41,6 +45,10 @@ DELAY_MIN = 0.04        # atraso aleatório antes de cada tecla (segundos)
 DELAY_MAX = 0.09
 RETRY_AFTER = 0.5       # se a caixa não andar nesse tempo, aperta de novo
 
+CLICK_DELAY_MIN = 0.05  # atraso aleatório antes de cada clique (segundos)
+CLICK_DELAY_MAX = 0.12
+CLICK_IGNORE = 0.8      # não clica de novo na mesma bolinha antes disso
+
 # Pasta ao lado do .exe (quando empacotado) ou do .py (rodando direto).
 # Dentro do .exe, __file__ aponta pra uma pasta temporária, por isso o sys.executable.
 if getattr(sys, "frozen", False):
@@ -48,7 +56,15 @@ if getattr(sys, "frozen", False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG = os.path.join(BASE_DIR, "config.json")
-DEBUG_PNG = os.path.join(BASE_DIR, "debug.png")
+DIGITOS_DIR = os.path.join(BASE_DIR, "digitos")             # modelos do usuário
+DEBUG_DIGITOS_DIR = os.path.join(BASE_DIR, "debug_digitos")  # recortes do teste
+
+MODES = {"setas": "Setas", "numeros": "Números"}
+
+
+def debug_png(mode):
+    return os.path.join(BASE_DIR, f"debug_{mode}.png")
+
 
 # --------------------------------------------------------------------------
 # Win32: DPI, mouse, teclado
@@ -95,8 +111,18 @@ KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
 
+MOUSEEVENTF_MOVE = 0x0001
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_VIRTUALDESK = 0x4000
+MOUSEEVENTF_ABSOLUTE = 0x8000
+
 # Scancodes das setas (precisam da flag EXTENDED, senão viram o numpad)
 SCAN = {"up": 0x48, "down": 0x50, "left": 0x4B, "right": 0x4D}
+
+
+def _send_input(inp):
+    user32.SendInput(1, ctypes.pointer(inp), ctypes.sizeof(inp))
 
 
 def _send(scan, up=False):
@@ -106,8 +132,14 @@ def _send(scan, up=False):
     extra = ctypes.c_ulong(0)
     ii = InputUnion()
     ii.ki = KeyBdInput(0, scan, flags, 0, ctypes.pointer(extra))
-    inp = Input(1, ii)
-    user32.SendInput(1, ctypes.pointer(inp), ctypes.sizeof(inp))
+    _send_input(Input(1, ii))
+
+
+def _mouse(flags, dx=0, dy=0):
+    extra = ctypes.c_ulong(0)
+    ii = InputUnion()
+    ii.mi = MouseInput(dx, dy, 0, flags, 0, ctypes.pointer(extra))
+    _send_input(Input(0, ii))
 
 
 def tap(direction):
@@ -115,6 +147,20 @@ def tap(direction):
     _send(scan)
     time.sleep(random.uniform(0.025, 0.05))
     _send(scan, up=True)
+
+
+def click(x, y):
+    """Move o mouse até (x, y) da tela e dá um clique esquerdo."""
+    vx, vy = user32.GetSystemMetrics(76), user32.GetSystemMetrics(77)
+    vw, vh = user32.GetSystemMetrics(78), user32.GetSystemMetrics(79)
+    nx = int((x - vx) * 65535 / max(1, vw - 1))
+    ny = int((y - vy) * 65535 / max(1, vh - 1))
+    _mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny)
+    user32.SetCursorPos(int(x), int(y))  # garante a posição exata
+    time.sleep(random.uniform(0.015, 0.03))
+    _mouse(MOUSEEVENTF_LEFTDOWN)
+    time.sleep(random.uniform(0.03, 0.06))
+    _mouse(MOUSEEVENTF_LEFTUP)
 
 
 def cursor_pos():
@@ -139,13 +185,15 @@ def is_admin():
 # --------------------------------------------------------------------------
 DEFAULT_KEYS = {
     "ligar_desligar": "F6",
-    "calibrar": "F7",
+    "calibrar_setas": "F7",
+    "calibrar_numeros": "F8",
     "debug": "F9",
 }
 
 KEY_LABELS = {
     "ligar_desligar": "Ligar / desligar",
-    "calibrar": "Calibrar região",
+    "calibrar_setas": "Calibrar setas",
+    "calibrar_numeros": "Calibrar números",
     "debug": "Testar detecção",
 }
 
@@ -246,7 +294,7 @@ def build_bindings(keys, log=lambda msg: None):
 
 
 # --------------------------------------------------------------------------
-# Detecção
+# Detecção do minigame de setas
 # --------------------------------------------------------------------------
 def _main_run(counts, frac=0.3):
     """Pega o trecho contínuo em volta do pico (ignora ruído espalhado)."""
@@ -316,13 +364,23 @@ def load_config():
             cfg = {}
     if "left" in cfg:  # formato bem antigo: o arquivo era só a região
         cfg = {"regiao": cfg}
+    if "regiao" in cfg:  # versão só com setas
+        cfg.setdefault("setas", {})["regiao"] = cfg.pop("regiao")
+    for mode in MODES:
+        m = cfg.setdefault(mode, {})
+        m.setdefault("regiao", None)
+        m.setdefault("ativo", True)
+
     old = cfg.get("teclas", {})
-    if "calibrar" not in old and "canto_sup_esq" in old:  # versão com F7/F8
-        old["calibrar"] = old["canto_sup_esq"]
+    if "calibrar_setas" not in old:  # nomes de versões anteriores
+        old["calibrar_setas"] = old.get("calibrar", old.get("canto_sup_esq", "F7"))
     keys = dict(DEFAULT_KEYS)
     keys.update({k: v for k, v in old.items() if k in DEFAULT_KEYS})
     cfg["teclas"] = keys
-    cfg.setdefault("regiao", None)
+    # se dois atalhos ficaram iguais na migração, o mais novo volta pro padrão
+    if same_binding(keys["calibrar_setas"], keys["calibrar_numeros"]):
+        keys["calibrar_numeros"] = next(
+            k for k in ("F8", "F10", "F11") if not any(same_binding(k, v) for v in keys.values()))
     return cfg, erro
 
 
@@ -342,9 +400,10 @@ class Bot:
     Eventos enviados por on_event(tipo, dados):
       ("log", texto)
       ("estado", ligado: bool)
-      ("tecla", direção)
-      ("calibrar", (png_bytes, monitor))  -> print congelado pra escolher a região
-      ("debug", (png_bytes, resultado))   -> print da região + detecção
+      ("tecla", direção)                        -> seta apertada
+      ("clique", dígito)                        -> bolinha clicada
+      ("calibrar", (modo, png_bytes, monitor))  -> print congelado pra escolher a região
+      ("debug", (modo, png_bytes, resultado))   -> print da região + detecção
       ("erro", traceback)
     """
 
@@ -356,6 +415,9 @@ class Bot:
         self.requests = queue.Queue()
         self._stop = threading.Event()
         self.hk = Hotkeys(build_bindings(cfg["teclas"], self.log))
+        n = numeros.load_templates(DIGITOS_DIR)
+        if os.path.isdir(DIGITOS_DIR):
+            self.log(f"Modelos de dígito carregados (com a pasta digitos/): {n}.")
         self._reset_tracking()
         self.thread = threading.Thread(target=self._run, daemon=True)
 
@@ -371,23 +433,31 @@ class Bot:
         self.hk = Hotkeys(build_bindings(keys, self.log))
         save_config(self.cfg)
 
-    def set_region(self, region):
-        self.cfg["regiao"] = region
+    def set_region(self, mode, region):
+        self.cfg[mode]["regiao"] = region
         self._reset_tracking()
         save_config(self.cfg)
 
+    def set_mode_active(self, mode, on):
+        self.cfg[mode]["ativo"] = bool(on)
+        self._reset_tracking()
+        save_config(self.cfg)
+
+    def ready_modes(self):
+        return [m for m in MODES if self.cfg[m]["ativo"] and self.cfg[m]["regiao"]]
+
     def toggle(self):
-        if not self.cfg["regiao"]:
-            self.log("Calibre a região antes de ligar.")
+        if not self.active and not self.ready_modes():
+            self.log("Calibre a região de pelo menos um minigame ativo antes de ligar.")
             return
         self.active = not self.active
         self._reset_tracking()
         self.on_event("estado", self.active)
         self._beep(self.active)
 
-    def request(self, what):
-        """'calibrar' ou 'debug': o print é tirado na thread do bot."""
-        self.requests.put(what)
+    def request(self, what, mode=None):
+        """('calibrar', modo) ou ('debug', modo|None): o print é tirado na thread do bot."""
+        self.requests.put((what, mode))
 
     # ---- internos ----
     def log(self, msg):
@@ -397,6 +467,8 @@ class Bot:
         self.last_pos = None
         self.last_press = 0.0
         self.last_seen = 0.0
+        self.recent_clicks = []     # [(x, y, raio, instante)]
+        self.num_last_seen = 0.0
 
     @staticmethod
     def _beep(on):
@@ -419,7 +491,7 @@ class Bot:
     def _handle_requests(self, sct):
         while True:
             try:
-                what = self.requests.get_nowait()
+                what, mode = self.requests.get_nowait()
             except queue.Empty:
                 return
             if what == "calibrar":
@@ -430,17 +502,45 @@ class Bot:
                            sct.monitors[1])
                 shot = sct.grab(mon)
                 png = mss.tools.to_png(shot.rgb, shot.size, level=1)
-                self.on_event("calibrar", (png, dict(mon)))
+                self.on_event("calibrar", (mode, png, dict(mon)))
             elif what == "debug":
-                region = self.cfg["regiao"]
-                if not region:
-                    self.log("Calibre a região antes de testar.")
-                    continue
-                shot = sct.grab(region)
-                png = mss.tools.to_png(shot.rgb, shot.size)
-                with open(DEBUG_PNG, "wb") as f:
-                    f.write(png)
-                self.on_event("debug", (png, detect(np.array(shot))))
+                modes = [mode] if mode else [m for m in MODES if self.cfg[m]["regiao"]]
+                if not modes:
+                    self.log("Calibre uma região antes de testar.")
+                for m in modes:
+                    self._debug(sct, m)
+
+    def _debug(self, sct, mode):
+        region = self.cfg[mode]["regiao"]
+        if not region:
+            self.log(f"Calibre a região de {MODES[mode]} antes de testar.")
+            return
+        shot = sct.grab(region)
+        png = mss.tools.to_png(shot.rgb, shot.size)
+        with open(debug_png(mode), "wb") as f:
+            f.write(png)
+        img = np.array(shot)
+        if mode == "setas":
+            res = detect(img)
+        else:
+            crops = []
+            res = numeros.detect(img, crops)
+            self._save_digit_crops(crops)
+        self.on_event("debug", (mode, png, res))
+
+    @staticmethod
+    def _save_digit_crops(crops):
+        """Salva os números recortados, pra montar a pasta digitos/ se precisar."""
+        if not crops:
+            return
+        os.makedirs(DEBUG_DIGITOS_DIR, exist_ok=True)
+        stamp = time.strftime("%H%M%S")
+        for i, (digit, gray) in enumerate(crops):
+            im = (np.clip(gray, 0, 1) * 255).astype(np.uint8)
+            mss.tools.to_png(np.repeat(im[:, :, None], 3, 2).tobytes(),
+                             (im.shape[1], im.shape[0]),
+                             output=os.path.join(DEBUG_DIGITOS_DIR,
+                                                 f"{digit}_{stamp}_{i}.png"))
 
     def _loop(self, sct):
         while not self._stop.is_set():
@@ -448,36 +548,70 @@ class Bot:
                 hk = self.hk
                 if hk.pressed("ligar_desligar"):
                     self.toggle()
-                if hk.pressed("calibrar"):
-                    self.request("calibrar")
+                if hk.pressed("calibrar_setas"):
+                    self.request("calibrar", "setas")
+                if hk.pressed("calibrar_numeros"):
+                    self.request("calibrar", "numeros")
                 if hk.pressed("debug"):
                     self.request("debug")
             self._handle_requests(sct)
 
-            region = self.cfg["regiao"]
-            if not self.active or not region:
+            modes = self.ready_modes() if self.active else []
+            if not modes:
                 time.sleep(0.03)
                 continue
-
-            res = detect(np.array(sct.grab(region)))
-            now = time.time()
-
-            if res is None:
-                if now - self.last_seen > 0.4:
-                    self.last_pos = None  # minigame sumiu / nova rodada
+            acted = False
+            if "setas" in modes:
+                acted |= self._step_setas(sct)
+            if "numeros" in modes:
+                acted |= self._step_numeros(sct)
+            if not acted:
                 time.sleep(0.01)
+
+    def _step_setas(self, sct):
+        res = detect(np.array(sct.grab(self.cfg["setas"]["regiao"])))
+        now = time.time()
+
+        if res is None:
+            if now - self.last_seen > 0.4:
+                self.last_pos = None  # minigame sumiu / nova rodada
+            return False
+
+        self.last_seen = now
+        direction, pos = res
+
+        same_box = self.last_pos is not None and abs(pos - self.last_pos) < 5
+        if same_box and now - self.last_press < RETRY_AFTER:
+            return False
+
+        time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+        tap(direction)
+        self.last_pos = pos
+        self.last_press = time.time()
+        self.on_event("tecla", direction)
+        return True
+
+    def _step_numeros(self, sct):
+        region = self.cfg["numeros"]["regiao"]
+        circles = numeros.detect(np.array(sct.grab(region)))
+        now = time.time()
+        self.recent_clicks = [c for c in self.recent_clicks if now - c[3] < CLICK_IGNORE]
+
+        if not circles:
+            if now - self.num_last_seen > 1.0:
+                self.recent_clicks = []
+            return False
+        self.num_last_seen = now
+
+        # a menor bolinha na tela é sempre a próxima: as anteriores já foram
+        # clicadas e somem. Ignora as que acabaram de ser clicadas (estão sumindo).
+        for c in circles:
+            if any(abs(c["x"] - x) < r and abs(c["y"] - y) < r
+                   for x, y, r, _ in self.recent_clicks):
                 continue
-
-            self.last_seen = now
-            direction, pos = res
-
-            same_box = self.last_pos is not None and abs(pos - self.last_pos) < 5
-            if same_box and now - self.last_press < RETRY_AFTER:
-                time.sleep(0.005)
-                continue
-
-            time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
-            tap(direction)
-            self.last_pos = pos
-            self.last_press = time.time()
-            self.on_event("tecla", direction)
+            time.sleep(random.uniform(CLICK_DELAY_MIN, CLICK_DELAY_MAX))
+            click(region["left"] + c["x"], region["top"] + c["y"])
+            self.recent_clicks.append((c["x"], c["y"], c["raio"], time.time()))
+            self.on_event("clique", c["digito"])
+            return True
+        return False
